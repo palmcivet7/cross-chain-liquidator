@@ -6,6 +6,7 @@ import {IRouterClient} from "@chainlink/contracts-ccip/src/v0.8/ccip/interfaces/
 import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
+import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 
 contract LiquidationSender is Ownable {
     /*//////////////////////////////////////////////////////////////
@@ -15,7 +16,8 @@ contract LiquidationSender is Ownable {
     error LiquidationSender__NoZeroAmount();
     error LiquidationSender__DestinationChainNotAllowlisted(uint64 destinationChainSelector);
     error LiquidationSender__NotEnoughLink(uint256 linkBalance, uint256 requiredAmount);
-    error LiquidationSender__LinkTransferFailed();
+    error LiquidationSender__NotEnoughToken(address token, uint256 tokenBalance, uint256 attemptedWithdrawalAmount);
+    error LiquidationSender__TokenTransferFailed();
 
     /*//////////////////////////////////////////////////////////////
                                VARIABLES
@@ -106,11 +108,18 @@ contract LiquidationSender is Ownable {
     /*//////////////////////////////////////////////////////////////
                                 WITHDRAW
     //////////////////////////////////////////////////////////////*/
-    function withdrawLink(uint256 _amount) external onlyOwner revertIfZeroAmount(_amount) {
-        uint256 balance = i_link.balanceOf(address(this));
-        if (balance < _amount) revert LiquidationSender__NotEnoughLink(balance, _amount);
+    function withdrawToken(address _token, uint256 _amount)
+        external
+        onlyOwner
+        revertIfZeroAddress(_token)
+        revertIfZeroAmount(_amount)
+    {
+        uint256 balance = IERC20(_token).balanceOf(address(this));
+        if (balance < _amount) revert LiquidationSender__NotEnoughToken(_token, balance, _amount);
 
-        if (!i_link.transferFrom(address(this), msg.sender, _amount)) revert LiquidationSender__LinkTransferFailed();
+        if (!IERC20(_token).transferFrom(address(this), msg.sender, _amount)) {
+            revert LiquidationSender__TokenTransferFailed();
+        }
     }
 
     /*//////////////////////////////////////////////////////////////
