@@ -8,16 +8,16 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 
-contract LiquidationSender is Ownable {
+contract LiquidationInitiator is Ownable {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
-    error LiquidationSender__NoZeroAddress();
-    error LiquidationSender__NoZeroAmount();
-    error LiquidationSender__DestinationChainNotAllowlisted(uint64 destinationChainSelector);
-    error LiquidationSender__NotEnoughLink(uint256 linkBalance, uint256 requiredAmount);
-    error LiquidationSender__NotEnoughToken(address token, uint256 tokenBalance, uint256 attemptedWithdrawalAmount);
-    error LiquidationSender__TokenTransferFailed();
+    error LiquidationInitiator__NoZeroAddress();
+    error LiquidationInitiator__NoZeroAmount();
+    error LiquidationInitiator__DestinationChainNotAllowlisted(uint64 destinationChainSelector);
+    error LiquidationInitiator__NotEnoughLink(uint256 linkBalance, uint256 requiredAmount);
+    error LiquidationInitiator__NotEnoughToken(address token, uint256 tokenBalance, uint256 attemptedWithdrawalAmount);
+    error LiquidationInitiator__TokenTransferFailed();
 
     /*//////////////////////////////////////////////////////////////
                                VARIABLES
@@ -43,18 +43,18 @@ contract LiquidationSender is Ownable {
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
     modifier revertIfZeroAddress(address _address) {
-        if (_address == address(0)) revert LiquidationSender__NoZeroAddress();
+        if (_address == address(0)) revert LiquidationInitiator__NoZeroAddress();
         _;
     }
 
     modifier revertIfZeroAmount(uint256 _amount) {
-        if (_amount == 0) revert LiquidationSender__NoZeroAmount();
+        if (_amount == 0) revert LiquidationInitiator__NoZeroAmount();
         _;
     }
 
     modifier onlyAllowlistedDestinationChain(uint64 _destinationChainSelector) {
         if (!s_allowlistedDestinationChains[_destinationChainSelector]) {
-            revert LiquidationSender__DestinationChainNotAllowlisted(_destinationChainSelector);
+            revert LiquidationInitiator__DestinationChainNotAllowlisted(_destinationChainSelector);
         }
         _;
     }
@@ -75,15 +75,23 @@ contract LiquidationSender is Ownable {
     /*//////////////////////////////////////////////////////////////
                            EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver, uint64 _chainSelector)
+    function liquidateCrossChain(
+        address _liquidationTarget,
+        address _collateralAssetToReceive,
+        address _debtAssetToBorrowAndPay,
+        address _liquidationReceiver,
+        uint64 _chainSelector
+    )
         external
         revertIfZeroAddress(_liquidationTarget)
+        revertIfZeroAddress(_collateralAssetToReceive)
+        revertIfZeroAddress(_debtAssetToBorrowAndPay)
         revertIfZeroAddress(_liquidationReceiver)
         onlyAllowlistedDestinationChain(_chainSelector)
         returns (bytes32 messageId)
     {
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
-            receiver: abi.encode(_liquidationReceiver),
+            receiver: abi.encode(_liquidationReceiver, _collateralAssetToReceive, _debtAssetToBorrowAndPay),
             data: abi.encode(_liquidationTarget),
             tokenAmounts: new Client.EVMTokenAmount[](0),
             extraArgs: "",
@@ -93,7 +101,7 @@ contract LiquidationSender is Ownable {
         uint256 fees = i_ccipRouter.getFee(_chainSelector, message);
 
         if (fees > i_link.balanceOf(address(this))) {
-            revert LiquidationSender__NotEnoughLink(i_link.balanceOf(address(this)), fees);
+            revert LiquidationInitiator__NotEnoughLink(i_link.balanceOf(address(this)), fees);
         }
 
         messageId = i_ccipRouter.ccipSend(_chainSelector, message);
@@ -115,10 +123,10 @@ contract LiquidationSender is Ownable {
         revertIfZeroAmount(_amount)
     {
         uint256 balance = IERC20(_token).balanceOf(address(this));
-        if (balance < _amount) revert LiquidationSender__NotEnoughToken(_token, balance, _amount);
+        if (balance < _amount) revert LiquidationInitiator__NotEnoughToken(_token, balance, _amount);
 
         if (!IERC20(_token).transferFrom(address(this), msg.sender, _amount)) {
-            revert LiquidationSender__TokenTransferFailed();
+            revert LiquidationInitiator__TokenTransferFailed();
         }
     }
 
