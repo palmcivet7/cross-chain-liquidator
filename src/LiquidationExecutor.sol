@@ -30,7 +30,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     IPoolAddressesProvider private immutable i_addressesProvider;
     LinkTokenInterface private immutable i_link;
     IERC20 private immutable i_collateralAssetToReceive;
-    IERC20 private immutable i_debtAssetToBePaid;
+    IERC20 private immutable i_debtAssetToBorrowAndPay;
 
     IPool private s_pool;
     mapping(uint64 chainSelector => bool isAllowlisted) private s_allowlistedSourceChains;
@@ -60,20 +60,23 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         address _addressesProvider,
         address _link,
         address _collateralAssetToReceive,
-        address _debtAssetToBePaid
+        address _debtAssetToBorrowAndPay
     )
         CCIPReceiver(_router)
         Ownable(msg.sender)
         revertIfZeroAddress(_addressesProvider)
         revertIfZeroAddress(_link)
         revertIfZeroAddress(_collateralAssetToReceive)
-        revertIfZeroAddress(_debtAssetToBePaid)
+        revertIfZeroAddress(_debtAssetToBorrowAndPay)
     {
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
         i_link = LinkTokenInterface(_link);
         i_collateralAssetToReceive = IERC20(_collateralAssetToReceive);
-        i_debtAssetToBePaid = IERC20(_debtAssetToBePaid);
+        i_debtAssetToBorrowAndPay = IERC20(_debtAssetToBorrowAndPay);
         s_pool = IPool(i_addressesProvider.getPool());
+        i_link.approve(address(this), type(uint256).max);
+        i_collateralAssetToReceive.approve(address(this), type(uint256).max);
+        i_debtAssetToBorrowAndPay.approve(address(this), type(uint256).max);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -96,24 +99,28 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         onlyRouter
         onlyAllowlisted(_message.sourceChainSelector, abi.decode(_message.sender, (address)))
     {
-        (address liquidationTarget, address collateralAssetToReceive, address debtAssetToBorrowAndPay) =
-            abi.decode(_message.data, (address, address, address));
+        (address liquidationTarget) = abi.decode(_message.data, (address));
         IPool pool = s_pool;
-        (,,,,, uint256 targetHealthFactor) = pool.getUserAccountData(liquidationTarget);
+        (, uint256 totalDebtETH,,,, uint256 targetHealthFactor) = pool.getUserAccountData(liquidationTarget);
         if (targetHealthFactor >= HEALTHY_HEALTH_FACTOR) {
             revert LiquidationExecutor__TargetHealthFactorNotLiquidatable(targetHealthFactor);
         }
 
+        (, uint256 currentStableDebt, uint256 currentVariableDebt,,,,,,) =
+            pool.getUserReserveData(i_debtAssetToBorrowAndPay, liquidationTarget);
+
+        uint256 liquidationTargetDebt = currentStableDebt + currentVariableDebt;
+
         address[] memory assets = new address[](1);
-        assets[0] = debtAssetToBorrowAndPay;
+        assets[0] = i_debtAssetToBorrowAndPay;
         uint256[] memory amounts = new uint256[](1);
-        amounts[0] = AMOUNT_TO_BORROW; // need to find actual amount to borrow
+        amounts[0] = liquidationTargetDebt;
         uint256[] memory interestRateModes = new uint256[](1);
         interestRateModes[0] = 0;
         pool.flashLoan(address(this), assets, amounts, interestRateModes, address(this), "", 0);
 
         pool.liquidationCall(
-            collateralAssetToReceive, debtAssetToBorrowAndPay, liquidationTarget, MAX_PURCHASING_AMOUNT, false
+            i_collateralAssetToReceive, i_debtAssetToBorrowAndPay, liquidationTarget, MAX_PURCHASING_AMOUNT, false
         );
     }
 

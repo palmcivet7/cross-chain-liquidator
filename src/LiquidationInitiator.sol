@@ -75,23 +75,15 @@ contract LiquidationInitiator is Ownable {
     /*//////////////////////////////////////////////////////////////
                            EXTERNAL FUNCTIONS
     //////////////////////////////////////////////////////////////*/
-    function liquidateCrossChain(
-        address _liquidationTarget,
-        address _collateralAssetToReceive,
-        address _debtAssetToBorrowAndPay,
-        address _liquidationReceiver,
-        uint64 _chainSelector
-    )
+    function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver, uint64 _chainSelector)
         external
         revertIfZeroAddress(_liquidationTarget)
-        revertIfZeroAddress(_collateralAssetToReceive)
-        revertIfZeroAddress(_debtAssetToBorrowAndPay)
         revertIfZeroAddress(_liquidationReceiver)
         onlyAllowlistedDestinationChain(_chainSelector)
         returns (bytes32 messageId)
     {
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
-            receiver: abi.encode(_liquidationReceiver, _collateralAssetToReceive, _debtAssetToBorrowAndPay),
+            receiver: abi.encode(_liquidationReceiver),
             data: abi.encode(_liquidationTarget),
             tokenAmounts: new Client.EVMTokenAmount[](0),
             extraArgs: "",
