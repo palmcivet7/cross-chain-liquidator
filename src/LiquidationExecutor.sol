@@ -8,13 +8,14 @@ import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.s
 import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
-import {IFlashLoanReceiver} from "@aave/core-v3/contracts/flashloan/interfaces/IFlashLoanReceiver.sol";
+import {IFlashLoanSimpleReceiver} from "@aave/core-v3/contracts/flashloan/interfaces/IFlashLoanSimpleReceiver.sol";
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
 import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
 import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
+import {IStableDebtToken} from "@aave/core-v3/contracts/interfaces/IStableDebtToken.sol";
 
-contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
+contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -22,6 +23,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     error LiquidationExecutor__SourceChainNotAllowed(uint64 sourceChainSelector);
     error LiquidationExecutor__SenderNotAllowed(address sender);
     error LiquidationExecutor__TargetHealthFactorNotLiquidatable(uint256 targetHealthFactor);
+    error LiquidationExecutor__NoZeroAmount();
+    error LiquidationExecutor__OperationCanOnlyBeExecutedByAavePool(address caller);
+    error LiquidationExecutor__AssetMustMatchDebtAsset(address asset);
+    error LiquidationExecutor__NotEnoughToCoverFlashLoan(uint256 balance, uint256 amountOwed);
 
     /*//////////////////////////////////////////////////////////////
                                VARIABLES
@@ -40,6 +45,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     IERC20 private immutable i_debtAssetToBorrowAndPay;
     address private immutable i_collateralPriceFeed;
     address private immutable i_debtPriceFeed;
+    IStableDebtToken private immutable i_aaveStableDebtToken;
 
     IPool private s_pool;
     mapping(uint64 chainSelector => bool isAllowlisted) private s_allowlistedSourceChains;
@@ -72,7 +78,8 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         address _collateralAssetToReceive,
         address _debtAssetToBorrowAndPay,
         address _collateralPriceFeed,
-        address _debtPriceFeed
+        address _debtPriceFeed,
+        address _aaveStableDebtToken
     )
         CCIPReceiver(_router)
         Ownable(msg.sender)
@@ -83,6 +90,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         revertIfZeroAddress(_debtAssetToBorrowAndPay)
         revertIfZeroAddress(_collateralPriceFeed)
         revertIfZeroAddress(_debtPriceFeed)
+        revertIfZeroAddress(_aaveStableDebtToken)
     {
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
         i_link = LinkTokenInterface(_link);
@@ -94,20 +102,38 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         i_collateralAssetToReceive.approve(address(this), type(uint256).max);
         i_debtAssetToBorrowAndPay.approve(address(this), type(uint256).max);
         i_collateralAssetToReceive.approve(address(i_swapRouter), type(uint256).max);
+        i_debtAssetToBorrowAndPay.approve(address(s_pool), type(uint256).max);
         i_collateralPriceFeed = _collateralPriceFeed;
         i_debtPriceFeed = _debtPriceFeed;
+        i_aaveStableDebtToken = IStableDebtToken(_aaveStableDebtToken);
     }
 
     /*//////////////////////////////////////////////////////////////
                                FLASH LOAN
     //////////////////////////////////////////////////////////////*/
     function executeOperation(
-        address[] calldata assets,
-        uint256[] calldata amounts,
-        uint256[] calldata premiums,
-        address initiator,
-        bytes calldata params
-    ) external returns (bool) {}
+        address _asset,
+        uint256 _amount,
+        uint256 _premium,
+        address, /* _initiator */
+        bytes calldata _params
+    ) external returns (bool) {
+        IPool pool = s_pool;
+        if (msg.sender != address(pool)) revert LiquidationExecutor__OperationCanOnlyBeExecutedByAavePool(msg.sender);
+        if (_asset != address(i_debtAssetToBorrowAndPay)) revert LiquidationExecutor__AssetMustMatchDebtAsset(_asset);
+
+        (address liquidationTarget, uint256 debtToCover) = abi.decode(_params, (address, uint256));
+        pool.liquidationCall(address(i_collateralAssetToReceive), _asset, liquidationTarget, debtToCover, false);
+
+        uint256 collateralReceived = i_collateralAssetToReceive.balanceOf(address(this));
+        uint256 debtAssetAmount = _tradeCollateralReceivedForDebtBorrowed(collateralReceived);
+        uint256 amountToPay = _amount + _premium;
+        if (debtAssetAmount < amountToPay) {
+            revert LiquidationExecutor__NotEnoughToCoverFlashLoan(debtAssetAmount, amountToPay);
+        }
+
+        return true;
+    }
 
     /*//////////////////////////////////////////////////////////////
                                   CCIP
@@ -120,26 +146,18 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     {
         (address liquidationTarget) = abi.decode(_message.data, (address));
         IPool pool = s_pool;
-        (, uint256 totalDebtETH,,,, uint256 targetHealthFactor) = pool.getUserAccountData(liquidationTarget);
+        (,,,,, uint256 targetHealthFactor) = pool.getUserAccountData(liquidationTarget);
         if (targetHealthFactor >= HEALTHY_HEALTH_FACTOR) {
             revert LiquidationExecutor__TargetHealthFactorNotLiquidatable(targetHealthFactor);
         }
 
-        (, uint256 currentStableDebt, uint256 currentVariableDebt,,,,,,) =
-            pool.getUserReserveData(i_debtAssetToBorrowAndPay, liquidationTarget);
+        uint256 liquidationTargetDebt = i_aaveStableDebtToken.principalBalanceOf(liquidationTarget);
+        if (liquidationTargetDebt == 0) revert LiquidationExecutor__NoZeroAmount();
 
-        uint256 liquidationTargetDebt = currentStableDebt + currentVariableDebt;
+        bytes memory liquidationTargetInfo = abi.encode(liquidationTarget, liquidationTargetDebt);
 
-        address[] memory assets = new address[](1);
-        assets[0] = i_debtAssetToBorrowAndPay;
-        uint256[] memory amounts = new uint256[](1);
-        amounts[0] = liquidationTargetDebt;
-        uint256[] memory interestRateModes = new uint256[](1);
-        interestRateModes[0] = 0;
-        pool.flashLoan(address(this), assets, amounts, interestRateModes, address(this), "", 0);
-
-        pool.liquidationCall(
-            i_collateralAssetToReceive, i_debtAssetToBorrowAndPay, liquidationTarget, MAX_PURCHASING_AMOUNT, false
+        pool.flashLoanSimple(
+            address(this), address(i_debtAssetToBorrowAndPay), liquidationTargetDebt, liquidationTargetInfo, 0
         );
     }
 
