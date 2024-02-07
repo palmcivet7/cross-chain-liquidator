@@ -55,6 +55,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     IStableDebtToken private immutable i_aaveStableDebtToken;
     IAutomationRegistryConsumer private immutable i_automationConsumer;
     uint256 private immutable i_subId;
+    uint64 private immutable i_initiatorChainSelector;
 
     IPool private s_pool;
     address private s_forwarderAddress;
@@ -78,7 +79,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     }
 
     modifier onlyAllowlisted(uint64 _sourceChainSelector, address _sender) {
-        if (!s_allowlistedSourceChains[_sourceChainSelector]) {
+        if (_sourceChainSelector != i_initiatorChainSelector) {
             revert LiquidationExecutor__SourceChainNotAllowed(_sourceChainSelector);
         }
         if (!s_allowlistedSenders[_sender]) revert LiquidationExecutor__SenderNotAllowed(_sender);
@@ -99,7 +100,8 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         address _debtPriceFeed,
         address _aaveStableDebtToken,
         address _automationConsumer,
-        address _automationRegistrar
+        address _automationRegistrar,
+        uint64 _initiatorChainSelector
     )
         CCIPReceiver(_router)
         Ownable(msg.sender)
@@ -128,6 +130,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         i_collateralPriceFeed = _collateralPriceFeed;
         i_debtPriceFeed = _debtPriceFeed;
         i_aaveStableDebtToken = IStableDebtToken(_aaveStableDebtToken);
+        i_initiatorChainSelector = _initiatorChainSelector;
 
         RegistrationParams memory params = RegistrationParams({
             name: "",
