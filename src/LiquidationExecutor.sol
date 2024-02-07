@@ -11,6 +11,8 @@ import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/inte
 import {IFlashLoanReceiver} from "@aave/core-v3/contracts/flashloan/interfaces/IFlashLoanReceiver.sol";
 import {IPool} from "@aave/core-v3/contracts/interfaces/IPool.sol";
 import {IPoolAddressesProvider} from "@aave/core-v3/contracts/interfaces/IPoolAddressesProvider.sol";
+import {ISwapRouter} from "@uniswap/v3-periphery/contracts/interfaces/ISwapRouter.sol";
+import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
 
 contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     /*//////////////////////////////////////////////////////////////
@@ -26,11 +28,18 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
     //////////////////////////////////////////////////////////////*/
     uint256 private constant HEALTHY_HEALTH_FACTOR = 1e18;
     uint256 private constant MAX_PURCHASING_AMOUNT = type(uint256).max;
+    uint256 private constant MIN_AMOUNT_OUT_PERCENTAGE = 95_000;
+    uint256 private constant MIN_AMOUNT_OUT_DIVISOR = 100_000;
+    uint256 private constant PRICE_FEED_DECIMAL_PRECISION = 1e8;
+    uint24 private constant POOL_FEE = 3000;
 
     IPoolAddressesProvider private immutable i_addressesProvider;
     LinkTokenInterface private immutable i_link;
+    ISwapRouter private immutable i_swapRouter;
     IERC20 private immutable i_collateralAssetToReceive;
     IERC20 private immutable i_debtAssetToBorrowAndPay;
+    address private immutable i_collateralPriceFeed;
+    address private immutable i_debtPriceFeed;
 
     IPool private s_pool;
     mapping(uint64 chainSelector => bool isAllowlisted) private s_allowlistedSourceChains;
@@ -59,24 +68,34 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         address _router,
         address _addressesProvider,
         address _link,
+        address _swapRouter,
         address _collateralAssetToReceive,
-        address _debtAssetToBorrowAndPay
+        address _debtAssetToBorrowAndPay,
+        address _collateralPriceFeed,
+        address _debtPriceFeed
     )
         CCIPReceiver(_router)
         Ownable(msg.sender)
         revertIfZeroAddress(_addressesProvider)
         revertIfZeroAddress(_link)
+        revertIfZeroAddress(_swapRouter)
         revertIfZeroAddress(_collateralAssetToReceive)
         revertIfZeroAddress(_debtAssetToBorrowAndPay)
+        revertIfZeroAddress(_collateralPriceFeed)
+        revertIfZeroAddress(_debtPriceFeed)
     {
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
         i_link = LinkTokenInterface(_link);
+        i_swapRouter = ISwapRouter(_swapRouter);
         i_collateralAssetToReceive = IERC20(_collateralAssetToReceive);
         i_debtAssetToBorrowAndPay = IERC20(_debtAssetToBorrowAndPay);
         s_pool = IPool(i_addressesProvider.getPool());
         i_link.approve(address(this), type(uint256).max);
         i_collateralAssetToReceive.approve(address(this), type(uint256).max);
         i_debtAssetToBorrowAndPay.approve(address(this), type(uint256).max);
+        i_collateralAssetToReceive.approve(address(i_swapRouter), type(uint256).max);
+        i_collateralPriceFeed = _collateralPriceFeed;
+        i_debtPriceFeed = _debtPriceFeed;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -122,6 +141,44 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanReceiver {
         pool.liquidationCall(
             i_collateralAssetToReceive, i_debtAssetToBorrowAndPay, liquidationTarget, MAX_PURCHASING_AMOUNT, false
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                UNISWAP
+    //////////////////////////////////////////////////////////////*/
+    function _tradeCollateralReceivedForDebtBorrowed(uint256 _amountIn) private returns (uint256) {
+        ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
+            tokenIn: address(i_collateralAssetToReceive),
+            tokenOut: address(i_debtAssetToBorrowAndPay),
+            fee: POOL_FEE,
+            recipient: address(this),
+            deadline: block.timestamp + 2 minutes,
+            amountIn: _amountIn,
+            amountOutMinimum: _calculateAmountOutMinimum(_amountIn),
+            sqrtPriceLimitX96: 0
+        });
+
+        return i_swapRouter.exactInputSingle(params);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                               PRICEFEED
+    //////////////////////////////////////////////////////////////*/
+    function _calculateAmountOutMinimum(uint256 _amountIn) private view returns (uint256) {
+        uint256 priceInUSDTokenIn = _getPriceFeedData(i_collateralPriceFeed);
+        uint256 priceInUSDTokenOut = _getPriceFeedData(i_debtPriceFeed);
+
+        uint256 valueInUSD = (_amountIn * priceInUSDTokenIn) / PRICE_FEED_DECIMAL_PRECISION;
+        uint256 minValueInUSD = (valueInUSD * MIN_AMOUNT_OUT_PERCENTAGE) / MIN_AMOUNT_OUT_DIVISOR;
+        uint256 amountOutMinimum = (minValueInUSD * PRICE_FEED_DECIMAL_PRECISION) / priceInUSDTokenOut;
+
+        return amountOutMinimum;
+    }
+
+    function _getPriceFeedData(address _priceFeedAddress) private view returns (uint256) {
+        AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeedAddress);
+        (, int256 price,,,) = priceFeed.latestRoundData();
+        return uint256(price);
     }
 
     /*//////////////////////////////////////////////////////////////
