@@ -116,6 +116,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         revertIfZeroAddress(_automationConsumer)
         revertIfZeroAddress(_automationRegistrar)
     {
+        if (_initiatorChainSelector == 0) revert LiquidationExecutor__NoZeroAmount();
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
         i_link = LinkTokenInterface(_link);
         i_swapRouter = ISwapRouter(_swapRouter);
@@ -130,6 +131,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         i_collateralPriceFeed = _collateralPriceFeed;
         i_debtPriceFeed = _debtPriceFeed;
         i_aaveStableDebtToken = IStableDebtToken(_aaveStableDebtToken);
+        i_automationConsumer = IAutomationRegistryConsumer(_automationConsumer);
         i_initiatorChainSelector = _initiatorChainSelector;
 
         RegistrationParams memory params = RegistrationParams({
@@ -207,7 +209,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         );
     }
 
-    function _ccipSendProfitBackToInitiator(bytes _encodedProfit) private {}
+    function _ccipSendProfitBackToInitiator(bytes calldata _encodedProfit) private {}
 
     /*//////////////////////////////////////////////////////////////
                                AUTOMATION
@@ -248,7 +250,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
             amountOutMinimum: amountOut,
             sqrtPriceLimitX96: 0
         });
-        emit CollateralAssetReceivedSwappedForDebtAssetBorrowed(_amountIn, amountOut);
+        emit CollateralAssetSwappedForDebtAsset(_amountIn, amountOut);
         return i_swapRouter.exactInputSingle(params);
     }
 
