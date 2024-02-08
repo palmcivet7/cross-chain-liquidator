@@ -19,6 +19,7 @@ import {ILogAutomation, Log} from "@chainlink/contracts/src/v0.8/automation/inte
 import {IAutomationRegistryConsumer} from
     "@chainlink/contracts/src/v0.8/automation/interfaces/IAutomationRegistryConsumer.sol";
 import {IAutomationRegistrar, RegistrationParams} from "./interfaces/IAutomationRegistrar.sol";
+import {IPoolDataProvider} from "@aave/core-v3/contracts/interfaces/IPoolDataProvider.sol";
 
 contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver, AutomationBase {
     /*//////////////////////////////////////////////////////////////
@@ -52,8 +53,8 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     IERC20 private immutable i_debtAssetToBorrowAndPay;
     address private immutable i_collateralPriceFeed;
     address private immutable i_debtPriceFeed;
-    IStableDebtToken private immutable i_aaveStableDebtToken;
     IAutomationRegistryConsumer private immutable i_automationConsumer;
+    IPoolDataProvider private immutable i_poolDataProvider;
     uint256 private immutable i_subId;
     uint64 private immutable i_initiatorChainSelector;
 
@@ -98,9 +99,9 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         address _debtAssetToBorrowAndPay,
         address _collateralPriceFeed,
         address _debtPriceFeed,
-        address _aaveStableDebtToken,
         address _automationConsumer,
         address _automationRegistrar,
+        address _poolDataProvider,
         uint64 _initiatorChainSelector
     )
         CCIPReceiver(_router)
@@ -112,9 +113,9 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         revertIfZeroAddress(_debtAssetToBorrowAndPay)
         revertIfZeroAddress(_collateralPriceFeed)
         revertIfZeroAddress(_debtPriceFeed)
-        revertIfZeroAddress(_aaveStableDebtToken)
         revertIfZeroAddress(_automationConsumer)
         revertIfZeroAddress(_automationRegistrar)
+        revertIfZeroAddress(_poolDataProvider)
     {
         if (_initiatorChainSelector == 0) revert LiquidationExecutor__NoZeroAmount();
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
@@ -130,8 +131,8 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         i_debtAssetToBorrowAndPay.approve(address(s_pool), type(uint256).max);
         i_collateralPriceFeed = _collateralPriceFeed;
         i_debtPriceFeed = _debtPriceFeed;
-        i_aaveStableDebtToken = IStableDebtToken(_aaveStableDebtToken);
         i_automationConsumer = IAutomationRegistryConsumer(_automationConsumer);
+        i_poolDataProvider = IPoolDataProvider(_poolDataProvider);
         i_initiatorChainSelector = _initiatorChainSelector;
 
         RegistrationParams memory params = RegistrationParams({
@@ -197,7 +198,9 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
             revert LiquidationExecutor__TargetHealthFactorNotLiquidatable(targetHealthFactor);
         }
 
-        uint256 liquidationTargetDebt = i_aaveStableDebtToken.principalBalanceOf(liquidationTarget);
+        (, address stableDebtToken, /*address variableDebtToken */ ) =
+            i_poolDataProvider.getReserveTokensAddresses(address(i_debtAssetToBorrowAndPay));
+        uint256 liquidationTargetDebt = IStableDebtToken(stableDebtToken).principalBalanceOf(liquidationTarget);
         if (liquidationTargetDebt == 0) revert LiquidationExecutor__NoZeroAmount();
 
         bytes memory liquidationTargetInfo = abi.encode(liquidationTarget, liquidationTargetDebt);
