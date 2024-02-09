@@ -35,6 +35,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     error LiquidationExecutor__NotEnoughToCoverFlashLoan(uint256 balance, uint256 amountOwed);
     error LiquidationExecutor__AutomationRegistrationFailed();
     error LiquidationExecutor__OnlyForwarder(address caller);
+    error LiquidationExecutor__NotEnoughLink(uint256 linkBalance, uint256 requiredAmount);
 
     /*//////////////////////////////////////////////////////////////
                                VARIABLES
@@ -56,6 +57,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     IAutomationRegistryConsumer private immutable i_automationConsumer;
     IPoolDataProvider private immutable i_poolDataProvider;
     uint256 private immutable i_subId;
+    address private immutable i_liquidationInitiator;
     uint64 private immutable i_initiatorChainSelector;
 
     IPool private s_pool;
@@ -66,10 +68,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
-    event CCIPMessageReceivedAndFlashLoanCalled(address liquidationTarget);
+    event LiquidationTargetReceivedAndFlashLoanCalled(address liquidationTarget);
     event CollateralAssetSwappedForDebtAsset(uint256 amountIn, uint256 amountOut);
     event FlashLoanExecuted(uint256 profitAmount);
-    event CCIPMessageSent();
+    event ProfitSentBackToInitiator(bytes32 messageId, uint256 profitAmountSent);
 
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
@@ -79,11 +81,13 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         _;
     }
 
-    modifier onlyAllowlisted(uint64 _sourceChainSelector, address _sender) {
+    modifier onlyAllowlistedSender(uint64 _sourceChainSelector, address _sourceChainSender) {
         if (_sourceChainSelector != i_initiatorChainSelector) {
             revert LiquidationExecutor__SourceChainNotAllowed(_sourceChainSelector);
         }
-        if (!s_allowlistedSenders[_sender]) revert LiquidationExecutor__SenderNotAllowed(_sender);
+        if (_sourceChainSender != i_liquidationInitiator) {
+            revert LiquidationExecutor__SenderNotAllowed(_sourceChainSender);
+        }
         _;
     }
 
@@ -102,6 +106,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         address _automationConsumer,
         address _automationRegistrar,
         address _poolDataProvider,
+        address _liquidationInitiator,
         uint64 _initiatorChainSelector
     )
         CCIPReceiver(_router)
@@ -116,6 +121,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         revertIfZeroAddress(_automationConsumer)
         revertIfZeroAddress(_automationRegistrar)
         revertIfZeroAddress(_poolDataProvider)
+        revertIfZeroAddress(_liquidationInitiator)
     {
         if (_initiatorChainSelector == 0) revert LiquidationExecutor__NoZeroAmount();
         i_addressesProvider = IPoolAddressesProvider(_addressesProvider);
@@ -133,6 +139,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         i_debtPriceFeed = _debtPriceFeed;
         i_automationConsumer = IAutomationRegistryConsumer(_automationConsumer);
         i_poolDataProvider = IPoolDataProvider(_poolDataProvider);
+        i_liquidationInitiator = _liquidationInitiator;
         i_initiatorChainSelector = _initiatorChainSelector;
 
         RegistrationParams memory params = RegistrationParams({
@@ -189,7 +196,7 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         internal
         override
         onlyRouter
-        onlyAllowlisted(_message.sourceChainSelector, abi.decode(_message.sender, (address)))
+        onlyAllowlistedSender(_message.sourceChainSelector, abi.decode(_message.sender, (address)))
     {
         (address liquidationTarget) = abi.decode(_message.data, (address));
         IPool pool = s_pool;
@@ -205,14 +212,35 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
 
         bytes memory liquidationTargetInfo = abi.encode(liquidationTarget, liquidationTargetDebt);
 
-        emit CCIPMessageReceivedAndFlashLoanCalled(liquidationTarget);
+        emit LiquidationTargetReceivedAndFlashLoanCalled(liquidationTarget);
 
         pool.flashLoanSimple(
             address(this), address(i_debtAssetToBorrowAndPay), liquidationTargetDebt, liquidationTargetInfo, 0
         );
     }
 
-    function _ccipSendProfitBackToInitiator(bytes calldata _encodedProfit) private {}
+    function _ccipSendProfitBackToInitiator(bytes calldata _encodedProfit) private returns (bytes32 messageId) {
+        (uint256 profit) = abi.decode(_encodedProfit, (uint256));
+        Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);
+        tokenAmounts[0] = Client.EVMTokenAmount({token: address(i_debtAssetToBorrowAndPay), amount: profit});
+
+        Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
+            receiver: abi.encode(i_liquidationInitiator),
+            data: abi.encode(address(i_debtAssetToBorrowAndPay), profit),
+            tokenAmounts: tokenAmounts,
+            extraArgs: "",
+            feeToken: address(i_link)
+        });
+
+        uint256 fees = IRouterClient(i_ccipRouter).getFee(i_initiatorChainSelector, message);
+        if (fees > i_link.balanceOf(address(this))) {
+            revert LiquidationExecutor__NotEnoughLink(i_link.balanceOf(address(this)), fees);
+        }
+
+        messageId = IRouterClient(i_ccipRouter).ccipSend(i_initiatorChainSelector, message);
+        emit ProfitSentBackToInitiator(messageId, profit);
+        return messageId;
+    }
 
     /*//////////////////////////////////////////////////////////////
                                AUTOMATION
@@ -280,14 +308,6 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                  SETTER
     //////////////////////////////////////////////////////////////*/
-    function allowlistSourceChain(uint64 _sourceChainSelector, bool _allowed) external onlyOwner {
-        s_allowlistedSourceChains[_sourceChainSelector] = _allowed;
-    }
-
-    function allowlistSender(address _sender, bool _allowed) external onlyOwner {
-        s_allowlistedSenders[_sender] = _allowed;
-    }
-
     function setForwarderAddress(address _forwarderAddress) external onlyOwner {
         s_forwarderAddress = _forwarderAddress;
     }

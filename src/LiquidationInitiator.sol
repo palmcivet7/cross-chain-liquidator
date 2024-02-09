@@ -7,14 +7,17 @@ import {Client} from "@chainlink/contracts-ccip/src/v0.8/ccip/libraries/Client.s
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/interfaces/LinkTokenInterface.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 
-contract LiquidationInitiator is Ownable {
+contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
     //////////////////////////////////////////////////////////////*/
     error LiquidationInitiator__NoZeroAddress();
     error LiquidationInitiator__NoZeroAmount();
     error LiquidationInitiator__DestinationChainNotAllowlisted(uint64 destinationChainSelector);
+    error LiquidationInitiator__SourceChainNotAllowed(uint64 destinationChainSelector);
+    error LiquidationInitiator__SenderNotAllowed(address sourceChainSender);
     error LiquidationInitiator__NotEnoughLink(uint256 linkBalance, uint256 requiredAmount);
     error LiquidationInitiator__NotEnoughToken(address token, uint256 tokenBalance, uint256 attemptedWithdrawalAmount);
     error LiquidationInitiator__TokenTransferFailed();
@@ -22,22 +25,17 @@ contract LiquidationInitiator is Ownable {
     /*//////////////////////////////////////////////////////////////
                                VARIABLES
     //////////////////////////////////////////////////////////////*/
-    IRouterClient private immutable i_ccipRouter;
     LinkTokenInterface private immutable i_link;
+    uint64 private immutable i_executorChainSelector;
 
-    mapping(uint64 chainSelector => bool isAllowlisted) public s_allowlistedDestinationChains;
+    mapping(address sender => bool isAllowlisted) private s_allowlistedSenders;
+    mapping(uint64 chainSelector => bool isAllowlisted) private s_allowlistedDestinationChains;
 
     /*//////////////////////////////////////////////////////////////
                                  EVENTS
     //////////////////////////////////////////////////////////////*/
-    event LiquidationMessageSent(
-        bytes32 indexed messageId,
-        uint64 indexed destinationChainSelector,
-        address receiver,
-        address liquidationTarget,
-        address feeToken,
-        uint256 fees
-    );
+    event LiquidationMessageSent(bytes32 indexed messageId, address indexed liquidationTarget);
+    event LiquidationProfitReceived(address indexed tokenReceived, uint256 indexed profitReceived);
 
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
@@ -53,8 +51,19 @@ contract LiquidationInitiator is Ownable {
     }
 
     modifier onlyAllowlistedDestinationChain(uint64 _destinationChainSelector) {
-        if (!s_allowlistedDestinationChains[_destinationChainSelector]) {
+        if (_destinationChainSelector != i_executorChainSelector) {
             revert LiquidationInitiator__DestinationChainNotAllowlisted(_destinationChainSelector);
+        }
+
+        _;
+    }
+
+    modifier onlyAllowlistedSender(uint64 _sourceChainSelector, address _sourceChainSender) {
+        if (_sourceChainSelector != i_executorChainSelector) {
+            revert LiquidationInitiator__SourceChainNotAllowed(_sourceChainSelector);
+        }
+        if (!s_allowlistedSenders[_sourceChainSender]) {
+            revert LiquidationInitiator__SenderNotAllowed(_sourceChainSender);
         }
         _;
     }
@@ -62,18 +71,20 @@ contract LiquidationInitiator is Ownable {
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
-    constructor(address _router, address _link)
+    constructor(address _router, address _link, uint64 _executorChainSelector)
         Ownable(msg.sender)
+        CCIPReceiver(_router)
         revertIfZeroAddress(_router)
         revertIfZeroAddress(_link)
+        revertIfZeroAmount(uint256(_executorChainSelector))
     {
-        i_ccipRouter = IRouterClient(_router);
         i_link = LinkTokenInterface(_link);
         i_link.approve(address(this), type(uint256).max);
+        i_executorChainSelector = _executorChainSelector;
     }
 
     /*//////////////////////////////////////////////////////////////
-                           EXTERNAL FUNCTIONS
+                                  CCIP
     //////////////////////////////////////////////////////////////*/
     function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver, uint64 _chainSelector)
         external
@@ -90,19 +101,24 @@ contract LiquidationInitiator is Ownable {
             feeToken: address(i_link)
         });
 
-        uint256 fees = i_ccipRouter.getFee(_chainSelector, message);
-
+        uint256 fees = IRouterClient(i_ccipRouter).getFee(_chainSelector, message);
         if (fees > i_link.balanceOf(address(this))) {
             revert LiquidationInitiator__NotEnoughLink(i_link.balanceOf(address(this)), fees);
         }
 
-        messageId = i_ccipRouter.ccipSend(_chainSelector, message);
-
-        emit LiquidationMessageSent(
-            messageId, _chainSelector, _liquidationReceiver, _liquidationTarget, address(0), fees
-        );
-
+        messageId = IRouterClient(i_ccipRouter).ccipSend(_chainSelector, message);
+        emit LiquidationMessageSent(messageId, _liquidationTarget);
         return messageId;
+    }
+
+    function _ccipReceive(Client.Any2EVMMessage memory _message)
+        internal
+        override
+        onlyAllowlistedSender(_message.sourceChainSelector, abi.decode(_message.sender, (address)))
+    {
+        (address tokenReceived, uint256 profitReceived) = abi.decode(_message.data, (address, uint256));
+        assert(IERC20(tokenReceived).balanceOf(address(this)) >= profitReceived);
+        emit LiquidationProfitReceived(tokenReceived, profitReceived);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -125,7 +141,7 @@ contract LiquidationInitiator is Ownable {
     /*//////////////////////////////////////////////////////////////
                                  SETTER
     //////////////////////////////////////////////////////////////*/
-    function allowlistDestinationChain(uint64 _destinationChainSelector, bool _allowed) external onlyOwner {
-        s_allowlistedDestinationChains[_destinationChainSelector] = _allowed;
+    function allowlistSourceChainSender(address _sourceChainSender, bool _allowed) external onlyOwner {
+        s_allowlistedSenders[_sourceChainSender] = _allowed;
     }
 }
