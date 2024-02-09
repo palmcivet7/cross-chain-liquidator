@@ -21,6 +21,17 @@ import {IAutomationRegistryConsumer} from
 import {IAutomationRegistrar, RegistrationParams} from "./interfaces/IAutomationRegistrar.sol";
 import {IPoolDataProvider} from "@aave/core-v3/contracts/interfaces/IPoolDataProvider.sol";
 
+/**
+ * @title LiquidationExecutor
+ * @author palmcivet
+ * @notice This is one of two contracts in the Cross-Chain Liquidation Protocol. The other is LiquidationInitiator.
+ * This contract does the following:
+ *  - Receives the address of the target for liquidation calls
+ *  - Takes out a flash loan which is used to liquidate the target
+ *  - Swap the collateral asset received for the debt asset borrowed using Uniswap
+ *  - Pay back the flash loan
+ *  - Chainlink Automation monitors this event and send profits back to the LiquidationInitiator
+ */
 contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver, AutomationBase {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS

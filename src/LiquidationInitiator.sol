@@ -70,6 +70,12 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Initializes the contract
+     * @param _router Address of the CCIP Router contract
+     * @param _link Address of the LINK token contract
+     * @param _executorChainSelector CCIP Chain Selector for the chain the LiquidationExecutor contract exists
+     */
     constructor(address _router, address _link, uint64 _executorChainSelector)
         Ownable(msg.sender)
         CCIPReceiver(_router)
@@ -85,14 +91,20 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                   CCIP
     //////////////////////////////////////////////////////////////*/
-    function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver)
+    /**
+     * @notice Primary function for using the Cross-Chain Liquidation Protocol
+     * @param _liquidationTarget Address of the liquidation target with an under-collateralized position on Aave
+     * @param _liquidationExecutor Address of the LiquidationExecutor contract on the other chain
+     * @dev This function uses Chainlink CCIP to send the _liquidationTarget address across chains
+     */
+    function liquidateCrossChain(address _liquidationTarget, address _liquidationExecutor)
         external
         revertIfZeroAddress(_liquidationTarget)
-        revertIfZeroAddress(_liquidationReceiver)
+        revertIfZeroAddress(_liquidationExecutor)
         returns (bytes32 messageId)
     {
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
-            receiver: abi.encode(_liquidationReceiver),
+            receiver: abi.encode(_liquidationExecutor),
             data: abi.encode(_liquidationTarget),
             tokenAmounts: new Client.EVMTokenAmount[](0),
             extraArgs: "",
@@ -110,6 +122,10 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
         return messageId;
     }
 
+    /**
+     * @param _message When this CCIP message is decoded it will contain the address of the token received and how much profit
+     * @dev This function is needed to receive CCIP messages
+     */
     function _ccipReceive(Client.Any2EVMMessage memory _message)
         internal
         override
@@ -122,6 +138,11 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                 WITHDRAW
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Withdraw ERC20 tokens - currently only callable by the owner of the contract
+     * @param _token Address of the token to withdraw
+     * @param _amount Amount of the token to withdraw
+     */
     function withdrawToken(address _token, uint256 _amount)
         external
         onlyOwner
@@ -139,6 +160,11 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                  SETTER
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Maps an address to a boolean, to be used as a check for if that address can send a CCIP message to address(this)
+     * @param _sourceChainSender Address of LiquidationExecutor
+     * @param _allowed Set to true to allow _sourceChainSender
+     */
     function allowlistSourceChainSender(address _sourceChainSender, bool _allowed) external onlyOwner {
         s_allowlistedSenders[_sourceChainSender] = _allowed;
     }
