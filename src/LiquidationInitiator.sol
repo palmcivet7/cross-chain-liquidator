@@ -9,6 +9,13 @@ import {LinkTokenInterface} from "@chainlink/contracts-ccip/src/v0.8/shared/inte
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
 import {CCIPReceiver} from "@chainlink/contracts-ccip/src/v0.8/ccip/applications/CCIPReceiver.sol";
 
+/**
+ * @title LiquidationInitiator
+ * @author palmcivet
+ * @notice This is one of two contracts in the Cross-Chain Liquidation Protocol. The other is LiquidationExecutor.
+ * Users interact with this contract by sending the address of their liquidation target to the LiquidationExecutor.
+ * Profits from liquidations will be sent back to this contract.
+ */
 contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                  ERRORS
@@ -50,14 +57,6 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
         _;
     }
 
-    modifier onlyAllowlistedDestinationChain(uint64 _destinationChainSelector) {
-        if (_destinationChainSelector != i_executorChainSelector) {
-            revert LiquidationInitiator__DestinationChainNotAllowlisted(_destinationChainSelector);
-        }
-
-        _;
-    }
-
     modifier onlyAllowlistedSender(uint64 _sourceChainSelector, address _sourceChainSender) {
         if (_sourceChainSelector != i_executorChainSelector) {
             revert LiquidationInitiator__SourceChainNotAllowed(_sourceChainSelector);
@@ -86,11 +85,10 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     /*//////////////////////////////////////////////////////////////
                                   CCIP
     //////////////////////////////////////////////////////////////*/
-    function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver, uint64 _chainSelector)
+    function liquidateCrossChain(address _liquidationTarget, address _liquidationReceiver)
         external
         revertIfZeroAddress(_liquidationTarget)
         revertIfZeroAddress(_liquidationReceiver)
-        onlyAllowlistedDestinationChain(_chainSelector)
         returns (bytes32 messageId)
     {
         Client.EVM2AnyMessage memory message = Client.EVM2AnyMessage({
@@ -101,13 +99,13 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
             feeToken: address(i_link)
         });
 
-        uint256 fees = IRouterClient(i_ccipRouter).getFee(_chainSelector, message);
+        uint256 fees = IRouterClient(i_ccipRouter).getFee(i_executorChainSelector, message);
         uint256 linkBalance = i_link.balanceOf(address(this));
         if (fees > linkBalance) {
             revert LiquidationInitiator__NotEnoughLink(linkBalance, fees);
         }
 
-        messageId = IRouterClient(i_ccipRouter).ccipSend(_chainSelector, message);
+        messageId = IRouterClient(i_ccipRouter).ccipSend(i_executorChainSelector, message);
         emit LiquidationMessageSent(messageId, _liquidationTarget);
         return messageId;
     }
