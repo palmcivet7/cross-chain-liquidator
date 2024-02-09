@@ -233,8 +233,9 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         });
 
         uint256 fees = IRouterClient(i_ccipRouter).getFee(i_initiatorChainSelector, message);
-        if (fees > i_link.balanceOf(address(this))) {
-            revert LiquidationExecutor__NotEnoughLink(i_link.balanceOf(address(this)), fees);
+        uint256 linkBalance = i_link.balanceOf(address(this));
+        if (fees > linkBalance) {
+            revert LiquidationExecutor__NotEnoughLink(linkBalance, fees);
         }
 
         messageId = IRouterClient(i_ccipRouter).ccipSend(i_initiatorChainSelector, message);

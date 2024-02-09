@@ -102,8 +102,9 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
         });
 
         uint256 fees = IRouterClient(i_ccipRouter).getFee(_chainSelector, message);
-        if (fees > i_link.balanceOf(address(this))) {
-            revert LiquidationInitiator__NotEnoughLink(i_link.balanceOf(address(this)), fees);
+        uint256 linkBalance = i_link.balanceOf(address(this));
+        if (fees > linkBalance) {
+            revert LiquidationInitiator__NotEnoughLink(linkBalance, fees);
         }
 
         messageId = IRouterClient(i_ccipRouter).ccipSend(_chainSelector, message);
@@ -117,7 +118,6 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
         onlyAllowlistedSender(_message.sourceChainSelector, abi.decode(_message.sender, (address)))
     {
         (address tokenReceived, uint256 profitReceived) = abi.decode(_message.data, (address, uint256));
-        assert(IERC20(tokenReceived).balanceOf(address(this)) >= profitReceived);
         emit LiquidationProfitReceived(tokenReceived, profitReceived);
     }
 
