@@ -288,6 +288,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         s_allowlistedSenders[_sender] = _allowed;
     }
 
+    function setForwarderAddress(address _forwarderAddress) external onlyOwner {
+        s_forwarderAddress = _forwarderAddress;
+    }
+
     /*//////////////////////////////////////////////////////////////
                                  GETTER
     //////////////////////////////////////////////////////////////*/
