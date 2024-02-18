@@ -58,8 +58,8 @@ contract LiquidationInitiator is Ownable, CCIPReceiver {
     }
 
     /**
-     * @notice CCIP best practice ensures we only receive messages from approved source.
-     * @param _sourceChainSelector CCIP Chain Selector of chain LiquidationExecutor is on.
+     * @notice CCIP best practice ensures we only receive messages from approved source
+     * @param _sourceChainSelector CCIP Chain Selector of chain LiquidationExecutor is on
      * @param _sourceChainSender Address of LiquidationExecutor
      */
     modifier onlyAllowlistedSender(uint64 _sourceChainSelector, address _sourceChainSender) {

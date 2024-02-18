@@ -92,6 +92,11 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         _;
     }
 
+    /**
+     * @notice CCIP best practice ensures we only receive messages from approved source
+     * @param _sourceChainSelector CCIP Chain Selector of chain LiquidationInitiator is on
+     * @param _sourceChainSender Address of LiquidationInitiator
+     */
     modifier onlyAllowlistedSender(uint64 _sourceChainSelector, address _sourceChainSender) {
         if (_sourceChainSelector != i_initiatorChainSelector) {
             revert LiquidationExecutor__SourceChainNotAllowed(_sourceChainSelector);
@@ -105,6 +110,23 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Initializes the contract, approves spending for collateral and debt assets, registers address(this) with
+     * Chainlink Log Trigger Automation. The deployer must hold LINK tokens to provide for the initial Automation subscription.
+     * @param _router Address of the CCIP Router contract
+     * @param _addressesProvider Address of the Aave Pool Address Provider contract for staying up to date with the Pool address
+     * @param _link Address of the LINK token contract
+     * @param _swapRouter Address of the Uniswap Router contract
+     * @param _collateralAssetToReceive Address of the collateral asset contract the liquidation target provided to Aave
+     * @param _debtAssetToBorrowAndPay Address of the debt asset contract the liquidation target borrowed from Aave
+     * @param _collateralPriceFeed Address of the Chainlink pricefeed contract for the collateral asset
+     * @param _debtPriceFeed Address of the Chainlink pricefeed contract for the debt asset
+     * @param _automationConsumer Address of the the Chainlink Automation Consumer contract
+     * @param _automationRegistrar Address of the Chainlink Automation Registrar contract
+     * @param _poolDataProvider Address of the Aave Pool Data Provider contract
+     * @param _liquidationInitiator Address of the LiquidationInitiator contract on Avalanche/other chain
+     * @param _initiatorChainSelector Chain selector of chain LiquidationInitiator is deployed
+     */
     constructor(
         address _router,
         address _addressesProvider,
@@ -174,6 +196,13 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                FLASH LOAN
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Called by Aave's Pool contract after taking out a flash loan
+     * @param _asset The asset being borrowed
+     * @param _amount The amount being borrowed
+     * @param _premium The flash loan fee
+     * @param _params Encoded data containing the liquidationTarget's address and the amount of their debt to cover
+     */
     function executeOperation(
         address _asset,
         uint256 _amount,
@@ -203,6 +232,11 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                   CCIP
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Receives the CCIP Message from LiquidationInitiator, checks their Aave health factor and how much debt they have
+     * before calling the flashLoanSimple() function from the Aave pool.
+     * @param _message CCIP message containing the address of the liquidationTarget
+     */
     function _ccipReceive(Client.Any2EVMMessage memory _message)
         internal
         override
@@ -230,6 +264,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         );
     }
 
+    /**
+     * @notice Sends the profits from the flash loan back to the LiquidationInitiator contract on Avalanche/Chain A
+     * @param _encodedProfit Encoded data containing the amount of profit being sent
+     */
     function _ccipSendProfitBackToInitiator(bytes calldata _encodedProfit) private returns (bytes32 messageId) {
         (uint256 profit) = abi.decode(_encodedProfit, (uint256));
         Client.EVMTokenAmount[] memory tokenAmounts = new Client.EVMTokenAmount[](1);
@@ -257,6 +295,12 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                AUTOMATION
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Simulated off-chain by Chainlink Automation nodes which call `performUpkeep()` when conditions evaluate to true
+     * @param _log The log we need to trigger our automation is the FlashLoanExecuted event
+     * @return upkeepNeeded Evaluates to true when FlashLoanExecuted is emitted
+     * @return performData Encoded data containing amount of profit
+     */
     function checkLog(Log calldata _log, bytes memory /* _checkData */ )
         external
         view
@@ -273,6 +317,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         }
     }
 
+    /**
+     * @notice Can only be called by Chainlink Automation Forwarder address
+     * @param _performData Encoded data containing amount of profit
+     */
     function performUpkeep(bytes calldata _performData) external {
         if (msg.sender != s_forwarderAddress) revert LiquidationExecutor__OnlyForwarder(msg.sender);
         _ccipSendProfitBackToInitiator(_performData);
@@ -281,6 +329,11 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                 UNISWAP
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Uses Uniswap to swap the collateral asset received from a liquidation call back to the debt asset borrowed so
+     * that we can pay back the flash loan.
+     * @param _amountIn Amount of the collateral asset to swap to the debt asset
+     */
     function _tradeCollateralReceivedForDebtBorrowed(uint256 _amountIn) private returns (uint256) {
         uint256 amountOut = _calculateAmountOutMinimum(_amountIn);
         ISwapRouter.ExactInputSingleParams memory params = ISwapRouter.ExactInputSingleParams({
@@ -300,6 +353,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                PRICEFEED
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Uses Chainlink Pricefeeds to calculate the minimum amount of debt asset out from a swap we want to receive
+     * @param _amountIn Amount of collateral asset we are putting in
+     */
     function _calculateAmountOutMinimum(uint256 _amountIn) private view returns (uint256) {
         uint256 priceInUSDTokenIn = _getPriceFeedData(i_collateralPriceFeed);
         uint256 priceInUSDTokenOut = _getPriceFeedData(i_debtPriceFeed);
@@ -311,6 +368,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
         return amountOutMinimum;
     }
 
+    /**
+     * @notice Returns the price of an asset using Chainlink Pricefeeds
+     * @param _priceFeedAddress Address of the Chainlink Pricefeed contract
+     */
     function _getPriceFeedData(address _priceFeedAddress) private view returns (uint256) {
         AggregatorV3Interface priceFeed = AggregatorV3Interface(_priceFeedAddress);
         (, int256 price,,,) = priceFeed.latestRoundData();
@@ -320,6 +381,10 @@ contract LiquidationExecutor is CCIPReceiver, Ownable, IFlashLoanSimpleReceiver,
     /*//////////////////////////////////////////////////////////////
                                  SETTER
     //////////////////////////////////////////////////////////////*/
+    /**
+     * @notice Only Owner function for setting the address that can call performUpkeep()
+     * @param _forwarderAddress Chainlink Automation Forwarder Address
+     */
     function setForwarderAddress(address _forwarderAddress) external onlyOwner {
         s_forwarderAddress = _forwarderAddress;
     }
